@@ -1,1 +1,235 @@
 # AutoM
+
+AutoM 是一个客服提交 MadCAD/PyMADCAD 绘图需求、后端创建任务、Worker 调用 `codex exec` 生成 CAD 结果的网站 MVP。
+
+当前实现刻意使用 Python 标准库、SQLite 和静态前端，减少 Linux/Windows 部署依赖。后续可以把 HTTP 层替换成 FastAPI、把前端替换成 React，但数据库和任务执行模型可以继续沿用。
+
+## 功能范围
+
+- 简单客服登录，用于记录任务由哪个客服提交。
+- 客服提交绘图需求，可附带参考图片。
+- SQLite 存储用户、会话、任务、附件、Job、事件和产物元数据。
+- 文件系统存储附件、Codex 工作目录、日志和输出文件。
+- Worker 串行领取任务并调用 `codex exec`。
+- 网站展示任务状态、事件日志、预览图，并提供结果文件下载。
+- 支持 dry-run 模式，不调用 Codex，便于本地验证流程。
+
+## 输出文件约定
+
+每个任务完成后，Worker 期望在 `output/` 目录中找到：
+
+- `model.py`：PyMADCAD/MadCAD 源脚本，客服可导入或继续编辑。
+- `model.stl`：通用 3D 模型文件。
+- `preview.png`：网站预览图。
+- `manifest.json`：文件清单和生成摘要。
+
+如果真实 Codex 运行没有生成这些文件，任务会标记为 `failed`，并保留 `codex.jsonl` 和 `stderr.log` 方便排查。
+
+## 目录结构
+
+```text
+autom_app/
+  config.py          配置和 .env 加载
+  database.py        SQLite 初始化和基础访问
+  security.py        密码 hash、session token
+  server.py          HTTP API 和静态文件服务
+  worker.py          Job 领取、Codex 执行、产物登记
+schema.sql           SQLite 表结构
+frontend/            静态页面、样式和 JS
+scripts/
+  setup.py           初始化目录、数据库、默认用户
+  run_server.py      启动网站，可同时启动内置 Worker
+  run_worker.py      单独启动 Worker
+  smoke_test.py      基础冒烟测试
+  run_server.sh      Linux/macOS 启动脚本
+  run_worker.sh
+  run_server.bat     Windows 启动脚本
+  run_worker.bat
+data/                运行后生成，默认不提交
+```
+
+## 快速开始
+
+1. 初始化数据库和默认账号：
+
+```bash
+python3 scripts/setup.py
+```
+
+Windows:
+
+```bat
+python scripts\setup.py
+```
+
+默认账号：
+
+```text
+admin / admin123
+support / support123
+```
+
+生产环境请立刻修改密码。当前 MVP 没有做复杂权限，`role` 主要用于后续扩展。
+
+2. 本地 dry-run 启动，不调用 Codex：
+
+```bash
+AUTOM_CODEX_DRY_RUN=1 python3 scripts/run_server.py
+```
+
+Windows PowerShell:
+
+```powershell
+$env:AUTOM_CODEX_DRY_RUN="1"
+python scripts\run_server.py
+```
+
+打开：
+
+```text
+http://127.0.0.1:8000
+```
+
+3. 使用真实 `codex exec`：
+
+```bash
+export CODEX_API_KEY="你的 OpenAI API Key"
+export AUTOM_CODEX_DRY_RUN=0
+python3 scripts/run_server.py
+```
+
+如果服务器上已经通过 `codex login` 配好账号，也可以不设置 `CODEX_API_KEY`，但生产环境更推荐用服务专用 API key，便于审计和轮换。
+
+## 配置
+
+配置可以通过环境变量或项目根目录 `.env` 设置。可参考 `.env.example`。
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `AUTOM_HOST` | `127.0.0.1` | HTTP 监听地址 |
+| `AUTOM_PORT` | `8000` | HTTP 端口 |
+| `AUTOM_DATA_DIR` | `data` | SQLite、附件、Job 和产物目录 |
+| `AUTOM_WORKER_ENABLED` | `1` | `run_server.py` 是否内置启动 Worker |
+| `AUTOM_CODEX_COMMAND` | `codex` | Codex CLI 命令路径 |
+| `AUTOM_CODEX_MODEL` | 空 | 可选，传给 `codex exec -m` |
+| `AUTOM_CODEX_DRY_RUN` | `0` | `1` 时生成示例文件，不调用 Codex |
+| `AUTOM_CODEX_TIMEOUT_SECONDS` | `1800` | 单任务 Codex 超时 |
+| `AUTOM_WORKER_POLL_SECONDS` | `3` | Worker 轮询间隔 |
+| `AUTOM_MAX_ATTACHMENT_BYTES` | `10485760` | 单个附件最大字节数 |
+| `AUTOM_SESSION_TTL_HOURS` | `72` | 登录有效期 |
+
+## 常用脚本
+
+Linux/macOS:
+
+```bash
+python3 scripts/setup.py
+python3 scripts/run_server.py
+python3 scripts/run_worker.py
+python3 scripts/smoke_test.py
+```
+
+Windows:
+
+```bat
+python scripts\setup.py
+python scripts\run_server.py
+python scripts\run_worker.py
+python scripts\smoke_test.py
+```
+
+`run_server.py` 默认会同时启动一个内置 Worker。生产环境也可以拆成两个进程：
+
+```bash
+AUTOM_WORKER_ENABLED=0 python3 scripts/run_server.py
+python3 scripts/run_worker.py
+```
+
+## Codex 执行方式
+
+真实任务会在独立目录中运行：
+
+```text
+data/jobs/{job_id}/
+  input/
+    request.json
+    attachments/
+  output/
+  logs/
+    codex.jsonl
+    stderr.log
+  prompt.txt
+  result.schema.json
+  final.json
+```
+
+Worker 调用命令形态：
+
+```bash
+codex exec \
+  --json \
+  --sandbox workspace-write \
+  --skip-git-repo-check \
+  --cd data/jobs/{job_id} \
+  --output-schema result.schema.json \
+  -o final.json \
+  -
+```
+
+如有参考图片，会追加 `-i input/attachments/xxx.png`。
+
+## 数据库
+
+SQLite schema 在 `schema.sql`。初始化脚本会执行该文件，并启用：
+
+- `PRAGMA foreign_keys = ON`
+- `PRAGMA journal_mode = WAL`
+- `PRAGMA busy_timeout = 5000`
+
+SQLite 只存元数据。大文件不进数据库，统一放在 `data/` 下，数据库保存相对路径、文件大小、hash 和类型。
+
+## Linux 部署建议
+
+推荐路径：
+
+```text
+/opt/autom       应用代码
+/var/lib/autom   数据目录
+/etc/autom/.env  配置
+```
+
+示例：
+
+```bash
+export AUTOM_DATA_DIR=/var/lib/autom
+export AUTOM_HOST=0.0.0.0
+export AUTOM_PORT=8000
+export CODEX_API_KEY=...
+python3 scripts/setup.py
+AUTOM_WORKER_ENABLED=0 python3 scripts/run_server.py
+python3 scripts/run_worker.py
+```
+
+生产环境建议用 Nginx 反代到 `127.0.0.1:8000`，再用 systemd 分别管理 API 和 Worker。
+
+## Windows 部署建议
+
+可以原生运行：
+
+```bat
+set AUTOM_DATA_DIR=C:\autom-data
+set AUTOM_HOST=0.0.0.0
+set AUTOM_PORT=8000
+set CODEX_API_KEY=...
+python scripts\setup.py
+python scripts\run_server.py
+```
+
+如果 MadCAD/PyMADCAD 或 Codex CLI 在 Windows 上依赖较难装，建议用 WSL2，把代码和数据放在 WSL 的 Linux 文件系统中运行。
+
+## 下一步建议
+
+- 增加修改密码页面。
+- 增加任务重试时的 prompt 版本记录。
+- 对 `model.py` 执行更严格的 MadCAD 校验。
+- 当每天任务耗时过长时，把 Worker 数量从 1 提升到 2 或更多。
