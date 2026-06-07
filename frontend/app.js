@@ -139,10 +139,7 @@ async function createTask(event) {
     const created = await api("/api/tasks", {
       method: "POST",
       body: JSON.stringify({
-        title: data.get("title"),
         customer_name: data.get("customer_name"),
-        unit: data.get("unit"),
-        priority: Number(data.get("priority") || 3),
         description: data.get("description"),
         attachments,
       }),
@@ -224,30 +221,8 @@ function renderCreateForm() {
     <form class="panel" onsubmit="createTask(event)">
       <h3>新建绘图需求</h3>
       <div class="field">
-        <label>标题</label>
-        <input name="title" required placeholder="例如：电机固定支架" />
-      </div>
-      <div class="field">
         <label>客户</label>
         <input name="customer_name" placeholder="客户名称，可选" />
-      </div>
-      <div class="row">
-        <div class="field">
-          <label>单位</label>
-          <select name="unit">
-            <option value="mm">mm</option>
-            <option value="cm">cm</option>
-            <option value="inch">inch</option>
-          </select>
-        </div>
-        <div class="field">
-          <label>优先级</label>
-          <select name="priority">
-            <option value="3">普通</option>
-            <option value="2">较高</option>
-            <option value="1">紧急</option>
-          </select>
-        </div>
       </div>
       <div class="field">
         <label>需求描述</label>

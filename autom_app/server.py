@@ -179,15 +179,13 @@ class AutomHandler(BaseHTTPRequestHandler):
         if user is None:
             return
         payload = self.read_json()
-        title = str(payload.get("title", "")).strip()
         description = str(payload.get("description", "")).strip()
-        if not title:
-            return self.send_error_json(HTTPStatus.BAD_REQUEST, "Title is required.")
         if not description:
             return self.send_error_json(HTTPStatus.BAD_REQUEST, "Description is required.")
         customer_name = str(payload.get("customer_name", "")).strip()
-        unit = str(payload.get("unit", "mm")).strip() or "mm"
-        priority = int(payload.get("priority", 3))
+        title = derive_title(customer_name, description)
+        unit = "mm"
+        priority = 3
         attachments = payload.get("attachments") or []
         if not isinstance(attachments, list):
             return self.send_error_json(HTTPStatus.BAD_REQUEST, "attachments must be a list.")
@@ -412,6 +410,17 @@ def parse_id(path: str, prefix: str) -> int | None:
     if "/" in text or not text.isdigit():
         return None
     return int(text)
+
+
+def derive_title(customer_name: str, description: str) -> str:
+    normalized = " ".join(description.split())
+    if len(normalized) > 28:
+        normalized = normalized[:28] + "..."
+    if customer_name and normalized:
+        return f"{customer_name} - {normalized}"
+    if normalized:
+        return normalized
+    return "未命名绘图需求"
 
 
 class AutomHTTPServer(ThreadingHTTPServer):
