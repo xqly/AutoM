@@ -1,6 +1,6 @@
 # AutoM
 
-AutoM 是一个客服提交 MadCAD/PyMADCAD 绘图需求、后端创建任务、Worker 调用 `codex exec` 生成 CAD 结果的网站 MVP。
+AutoM 是一个客服提交 MayCAD 铝型材绘图需求、后端创建任务、Worker 调用 `codex exec` 生成 MayCAD 录入/复核资料的网站 MVP。
 
 当前实现刻意使用 Python 标准库、SQLite 和静态前端，减少 Linux/Windows 部署依赖。后续可以把 HTTP 层替换成 FastAPI、把前端替换成 React，但数据库和任务执行模型可以继续沿用。
 
@@ -18,8 +18,9 @@ AutoM 是一个客服提交 MadCAD/PyMADCAD 绘图需求、后端创建任务、
 
 每个任务完成后，Worker 期望在 `output/` 目录中找到：
 
-- `model.py`：PyMADCAD/MadCAD 源脚本，客服可导入或继续编辑。
-- `model.stl`：通用 3D 模型文件。
+- `maycad_plan.json`：面向 MayCAD 操作员的结构化铝型材方案，包含型材、连接件、附件、加工和装配步骤。
+- `bom.csv`：物料清单。
+- `cut_list.csv`：型材切割清单。
 - `preview.png`：网站预览图。
 - `manifest.json`：文件清单和生成摘要。
 
@@ -203,8 +204,9 @@ codex exec \
 
 Worker 在真实模式下会做基础产物校验：
 
-- `model.py` 必须是非空 PyMADCAD/MadCAD 风格源码。
-- `model.stl` 必须看起来像 STL 数据。
+- `maycad_plan.json` 必须是面向 MayCAD 的结构化 JSON，并包含单位、型材和装配步骤。
+- `bom.csv` 必须包含表头和至少一行物料数据。
+- `cut_list.csv` 必须包含表头和至少一行切割数据。
 - `preview.png` 必须有 PNG 文件头。
 - `manifest.json` 必须是 JSON 对象，并包含 `unit` 和 `files`。
 
@@ -273,7 +275,7 @@ python scripts\setup.py
 python scripts\run_server.py
 ```
 
-如果 MadCAD/PyMADCAD 或 Codex CLI 在 Windows 上依赖较难装，建议用 WSL2，把代码和数据放在 WSL 的 Linux 文件系统中运行。
+如果 Codex CLI 在 Windows 上依赖较难装，建议用 WSL2，把代码和数据放在 WSL 的 Linux 文件系统中运行。
 
 ## 下一步建议
 
@@ -281,7 +283,7 @@ python scripts\run_server.py
 
 建议下一步继续做：
 
-- 对 `model.py` 执行更严格的 MadCAD/PyMADCAD 校验和预览渲染。
+- 对 `maycad_plan.json` 执行更严格的 MayCAD 录入规范校验，例如型材系列、连接件数量和切割长度一致性。
 - 增加任务重试时的 prompt 版本记录，便于回溯。
 - 做数据库备份脚本和 `data/` 清理策略。
 - 当每天任务耗时过长时，把 Worker 数量从 1 提升到 2 或更多。

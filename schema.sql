@@ -75,7 +75,11 @@ CREATE TABLE IF NOT EXISTS artifacts (
   request_id INTEGER NOT NULL REFERENCES drawing_requests(id) ON DELETE CASCADE,
   job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
   kind TEXT NOT NULL CHECK (
-    kind IN ('madcad_script','stl','preview_png','manifest','log','final_json')
+    kind IN (
+      'maycad_plan','bom_csv','cut_list_csv',
+      'madcad_script','stl',
+      'preview_png','manifest','log','final_json'
+    )
   ),
   storage_path TEXT NOT NULL,
   original_name TEXT NOT NULL,

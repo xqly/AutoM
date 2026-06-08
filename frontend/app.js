@@ -225,14 +225,14 @@ function render() {
 function renderCreateForm() {
   return `
     <form class="panel" onsubmit="createTask(event)">
-      <h3>新建绘图需求</h3>
+      <h3>新建 MayCAD 需求</h3>
       <div class="field">
         <label>客户名称</label>
         <input name="customer_name" placeholder="客户名称，可选" />
       </div>
       <div class="field">
         <label>需求描述</label>
-        <textarea name="description" required placeholder="请写明尺寸、孔位、厚度、材料、用途、约束条件等"></textarea>
+        <textarea name="description" required placeholder="请写明外形尺寸、型材规格、连接方式、承重/用途、附件、门板/脚轮/台面、约束条件等"></textarea>
       </div>
       <div class="field">
         <label>参考图片</label>
