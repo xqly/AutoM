@@ -108,6 +108,7 @@ class JobWorker:
                 self.run_dry_job(job_dir)
             else:
                 self.run_codex(job_id, job_dir)
+            self.validate_outputs(job_id, job_dir)
             self.register_artifacts(job_id, request_id, job_dir)
             final_status = self.read_final_status(job_dir)
             if final_status == "failed":
@@ -167,6 +168,7 @@ class JobWorker:
             encoding="utf-8",
         )
         (job_dir / "prompt.txt").write_text(self.build_prompt(request_payload), encoding="utf-8")
+        (job_dir / "CAD_CONTRACT.md").write_text(cad_contract(), encoding="utf-8")
         (job_dir / "result.schema.json").write_text(
             json.dumps(result_schema(), ensure_ascii=False, indent=2),
             encoding="utf-8",
@@ -179,17 +181,22 @@ class JobWorker:
             f"- {item['path']} ({item.get('mime_type') or 'unknown'}, {item['size_bytes']} bytes)"
             for item in attachments
         ) or "- None"
-        return f"""You are generating a MadCAD/PyMADCAD CAD result for a customer-service drawing request.
+        return f"""You are generating a real CAD deliverable for a customer-service drawing request.
 
-Use Python and PyMADCAD style code where possible. Keep all output inside the existing output/ directory.
+Read CAD_CONTRACT.md first and follow it exactly. Keep all output inside the existing output/ directory.
 
 Required files:
-1. output/model.py: editable MadCAD/PyMADCAD Python source script.
-2. output/model.stl: STL model export for customer-service import/use.
-3. output/preview.png: PNG preview image for the website.
-4. output/manifest.json: JSON summary with units, assumptions, dimensions, generated files, and caveats.
+1. output/model.py: editable PyMADCAD/MadCAD Python source script. It must contain clear geometry construction code and references to madcad/PyMADCAD APIs.
+2. output/model.stl: ASCII STL model export for customer-service import/use.
+3. output/preview.png: valid PNG preview image for the website.
+4. output/manifest.json: valid JSON summary with units, assumptions, dimensions, generated files, and caveats.
 
-Do not write outside this job directory. If the requirement is ambiguous, make conservative assumptions and record them in manifest.json.
+Important:
+- Do not write outside this job directory.
+- Do not ask follow-up questions. If the requirement is ambiguous, make conservative assumptions and record them in manifest.json.
+- The server running this task may not have madcad installed. You can still write model.py as editable PyMADCAD source and generate model.stl/preview.png with Python code you create during this job.
+- Prefer simple, manufacturable geometry over decorative shapes.
+- The final response must conform to result.schema.json and summarize the generated files.
 
 Request:
 Title: {request_payload['title']}
@@ -203,8 +210,6 @@ Description:
 
 Reference attachments:
 {attachment_lines}
-
-Final response must conform to result.schema.json and summarize the generated files.
 """
 
     def run_dry_job(self, job_dir: Path) -> None:
@@ -231,6 +236,12 @@ Final response must conform to result.schema.json and summarize the generated fi
         )
 
     def run_codex(self, job_id: int, job_dir: Path) -> None:
+        command_path = shutil.which(self.settings.codex_command)
+        if command_path is None and not Path(self.settings.codex_command).exists():
+            raise RuntimeError(
+                f"Codex command not found: {self.settings.codex_command}. "
+                "Set AUTOM_CODEX_COMMAND or install Codex CLI."
+            )
         prompt = (job_dir / "prompt.txt").read_text(encoding="utf-8")
         command = [
             self.settings.codex_command,
@@ -267,19 +278,119 @@ Final response must conform to result.schema.json and summarize the generated fi
                 stderr=stderr_file,
                 env=env,
             )
-            try:
-                process.communicate(prompt.encode("utf-8"), timeout=self.settings.codex_timeout_seconds)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.communicate()
-                raise RuntimeError(f"codex exec timed out after {self.settings.codex_timeout_seconds} seconds.")
+            accepted_early = self.wait_for_codex(job_id, job_dir, process, prompt)
 
         self.import_codex_events(job_id, job_dir / "logs" / "codex.jsonl")
 
-        if process.returncode != 0:
+        if not accepted_early and process.returncode != 0:
             stderr_tail = tail_text(job_dir / "logs" / "stderr.log")
             raise RuntimeError(f"codex exec failed with exit code {process.returncode}. {stderr_tail}")
-        self.event(job_id, "info", "codex.completed", "codex exec completed.")
+        if accepted_early:
+            self.event(job_id, "info", "codex.early_accepted", "Accepted validated output files before Codex final response.")
+        else:
+            self.event(job_id, "info", "codex.completed", "codex exec completed.")
+
+    def wait_for_codex(
+        self,
+        job_id: int,
+        job_dir: Path,
+        process: subprocess.Popen,
+        prompt: str,
+    ) -> bool:
+        if process.stdin is None:
+            raise RuntimeError("codex exec stdin is not available.")
+        try:
+            process.stdin.write(prompt.encode("utf-8"))
+            process.stdin.close()
+        except BrokenPipeError as exc:
+            raise RuntimeError("codex exec closed stdin before receiving the prompt.") from exc
+
+        deadline = time.monotonic() + self.settings.codex_timeout_seconds
+        stable_since: float | None = None
+        stable_signature: tuple | None = None
+        early_accept_seconds = max(0, self.settings.codex_early_accept_seconds)
+
+        while True:
+            return_code = process.poll()
+            if return_code is not None:
+                return False
+            if time.monotonic() > deadline:
+                process.kill()
+                process.wait(timeout=10)
+                raise RuntimeError(f"codex exec timed out after {self.settings.codex_timeout_seconds} seconds.")
+
+            if early_accept_seconds > 0:
+                valid, _error = self.outputs_are_valid(job_dir)
+                if valid:
+                    signature = output_signature(job_dir)
+                    if signature != stable_signature:
+                        stable_signature = signature
+                        stable_since = time.monotonic()
+                    elif stable_since is not None and time.monotonic() - stable_since >= early_accept_seconds:
+                        self.event(
+                            job_id,
+                            "info",
+                            "codex.early_accepting",
+                            f"Output files passed validation and were stable for {early_accept_seconds} seconds.",
+                        )
+                        process.terminate()
+                        try:
+                            process.wait(timeout=10)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait(timeout=10)
+                        return True
+                else:
+                    stable_since = None
+                    stable_signature = None
+
+            time.sleep(2)
+
+    def validate_outputs(self, job_id: int, job_dir: Path) -> None:
+        valid, error = self.outputs_are_valid(job_dir)
+        if not valid:
+            raise RuntimeError(error)
+        self.event(
+            job_id,
+            "info",
+            "outputs.validated",
+            "Validated model.py, model.stl, preview.png, and manifest.json.",
+        )
+
+    def outputs_are_valid(self, job_dir: Path) -> tuple[bool, str | None]:
+        output_dir = job_dir / "output"
+        expected = ["model.py", "model.stl", "preview.png", "manifest.json"]
+        missing = [name for name in expected if not (output_dir / name).is_file()]
+        if missing:
+            return False, "Missing expected output file(s): " + ", ".join(missing)
+
+        model_text = (output_dir / "model.py").read_text(encoding="utf-8", errors="replace")
+        if len(model_text.strip()) < 120:
+            return False, "output/model.py is too small to be a useful CAD source file."
+        if "madcad" not in model_text.lower() and "pymadcad" not in model_text.lower():
+            return False, "output/model.py must contain PyMADCAD/MadCAD source code."
+
+        stl_path = output_dir / "model.stl"
+        stl_head = stl_path.read_bytes()[:512]
+        if stl_path.stat().st_size < 100:
+            return False, "output/model.stl is too small to be a useful STL file."
+        if not (stl_head.lstrip().lower().startswith(b"solid") or stl_path.stat().st_size >= 84):
+            return False, "output/model.stl does not look like STL data."
+
+        png_path = output_dir / "preview.png"
+        if png_path.stat().st_size < 64 or not png_path.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n":
+            return False, "output/preview.png is not a valid PNG file."
+
+        try:
+            manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            return False, f"output/manifest.json is not valid JSON: {exc}"
+        if not isinstance(manifest, dict):
+            return False, "output/manifest.json must contain a JSON object."
+        for key in ("unit", "files"):
+            if key not in manifest:
+                return False, f"output/manifest.json missing required key: {key}"
+        return True, None
 
     def import_codex_events(self, job_id: int, jsonl_path: Path) -> None:
         if not jsonl_path.exists():
@@ -421,6 +532,69 @@ def result_schema() -> dict:
         "required": ["status", "summary", "files", "assumptions"],
         "additionalProperties": False,
     }
+
+
+def cad_contract() -> str:
+    return """# AutoM CAD Contract
+
+You are producing deliverables for a customer-service CAD request.
+
+## Required Output Files
+
+Create these exact files under `output/`:
+
+1. `model.py`
+   - Editable Python source intended for PyMADCAD/MadCAD.
+   - Include imports such as `from madcad import *` or `import madcad`.
+   - Define a `build_model()` function or similarly clear construction flow.
+   - Put all important dimensions near the top as named variables.
+   - Add short comments for assumptions and major features.
+
+2. `model.stl`
+   - ASCII STL preferred.
+   - Must represent the requested geometry, not a generic placeholder.
+   - If PyMADCAD is not available in this runtime, generate STL directly with Python using triangles derived from the same dimensions.
+
+3. `preview.png`
+   - Valid PNG image.
+   - Show a simple orthographic/isometric-style preview.
+   - It can be generated with Pillow if available, or with Python stdlib PNG writing if necessary.
+
+4. `manifest.json`
+   - Valid JSON object.
+   - Include at least:
+     - `unit`
+     - `assumptions`
+     - `dimensions`
+     - `files`
+     - `notes`
+
+## Behavior
+
+- Do not ask follow-up questions. Make conservative assumptions if the request is incomplete.
+- Record all assumptions in `manifest.json`.
+- Keep units in millimeters unless the request explicitly says otherwise.
+- Do not write outside the job directory.
+- Use simple, manufacturable solids and clean geometry.
+- Avoid decorative or unrelated features.
+- Do one concise self-check only: Python syntax, JSON validity, PNG validity, and STL presence/header/facet count.
+- Do not run open-ended mesh repair loops. If the requested files pass basic import-oriented checks, produce the final response.
+- Final answer must match `result.schema.json`.
+"""
+
+
+def output_signature(job_dir: Path) -> tuple:
+    output_dir = job_dir / "output"
+    names = ["model.py", "model.stl", "preview.png", "manifest.json"]
+    signature = []
+    for name in names:
+        path = output_dir / name
+        if not path.exists():
+            signature.append((name, None, None))
+        else:
+            stat = path.stat()
+            signature.append((name, stat.st_size, int(stat.st_mtime)))
+    return tuple(signature)
 
 
 def tail_text(path: Path, limit: int = 2000) -> str:

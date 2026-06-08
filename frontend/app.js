@@ -4,6 +4,7 @@ const state = {
   selectedTaskId: null,
   selectedTask: null,
   events: [],
+  health: null,
   statusFilter: "",
   loading: false,
   error: "",
@@ -55,7 +56,7 @@ async function bootstrap() {
   const data = await api("/api/me");
   state.user = data.user;
   if (state.user) {
-    await loadTasks();
+    await Promise.all([loadTasks(), loadHealth()]);
   }
   render();
 }
@@ -73,7 +74,7 @@ async function login(event) {
       }),
     });
     state.user = data.user;
-    await loadTasks();
+    await Promise.all([loadTasks(), loadHealth()]);
   } catch (error) {
     state.error = error.message;
   }
@@ -87,6 +88,10 @@ async function logout() {
   state.selectedTask = null;
   state.selectedTaskId = null;
   render();
+}
+
+async function loadHealth() {
+  state.health = await api("/api/health");
 }
 
 async function loadTasks() {
@@ -198,6 +203,7 @@ function render() {
       <header class="topbar">
         <div class="brand">AutoM</div>
         <div class="topbar-actions">
+          ${renderHealthBadge()}
           <span>${escapeHtml(state.user.display_name)}</span>
           <button onclick="logout()">退出</button>
         </div>
@@ -221,7 +227,7 @@ function renderCreateForm() {
     <form class="panel" onsubmit="createTask(event)">
       <h3>新建绘图需求</h3>
       <div class="field">
-        <label>客户</label>
+        <label>客户名称</label>
         <input name="customer_name" placeholder="客户名称，可选" />
       </div>
       <div class="field">
@@ -235,6 +241,16 @@ function renderCreateForm() {
       <button class="primary" type="submit" ${state.loading ? "disabled" : ""}>提交任务</button>
     </form>
   `;
+}
+
+function renderHealthBadge() {
+  if (!state.health) return "";
+  const mode = state.health.dry_run ? "Dry-run" : "Codex";
+  const codex = state.health.codex?.found ? "可用" : "未找到";
+  const running = state.health.tasks?.running || 0;
+  const queued = state.health.tasks?.queued || 0;
+  const status = state.health.dry_run || state.health.codex?.found ? "ok" : "bad";
+  return `<span class="health ${status}" title="排队 ${queued}，运行 ${running}">${mode} · ${codex}</span>`;
 }
 
 function renderTaskList() {
@@ -268,6 +284,7 @@ function renderTaskList() {
 function renderTaskDetail(detail) {
   const task = detail.task;
   const artifacts = detail.artifacts || [];
+  const attachments = detail.attachments || [];
   const preview = artifacts.find((item) => item.kind === "preview_png");
   const downloads = artifacts
     .map(
@@ -282,6 +299,18 @@ function renderTaskDetail(detail) {
   const events = state.events
     .map((event) => `<div class="event">[${escapeHtml(event.created_at)}] ${escapeHtml(event.level)} ${escapeHtml(event.event_type)}\n${escapeHtml(event.message || "")}</div>`)
     .join("");
+  const attachmentList = attachments
+    .map((item) => {
+      const isImage = String(item.mime_type || "").startsWith("image/");
+      return `
+        <a class="attachment" href="/api/attachments/${item.id}/download" target="_blank" rel="noreferrer">
+          ${isImage ? `<img src="/api/attachments/${item.id}/download" alt="${escapeHtml(item.original_name)}" />` : ""}
+          <span>${escapeHtml(item.original_name)}</span>
+          <small>${fmtBytes(item.size_bytes)}</small>
+        </a>
+      `;
+    })
+    .join("");
   return `
     <div class="detail-grid">
       <div>
@@ -294,6 +323,10 @@ function renderTaskDetail(detail) {
             单位：${escapeHtml(task.unit)}
           </div>
           <p>${escapeHtml(task.description).replaceAll("\\n", "<br />")}</p>
+          <div class="attachments-inline">
+            <strong>参考图片</strong>
+            ${attachmentList || '<span class="meta">无</span>'}
+          </div>
           <div class="actions">
             <button onclick="refreshSelected()">刷新</button>
             <button onclick="retryTask(${task.id})">重试</button>
@@ -327,7 +360,7 @@ async function selectTask(id) {
 }
 
 async function refreshSelected() {
-  await loadTasks();
+  await Promise.all([loadTasks(), loadHealth()]);
   render();
 }
 
@@ -341,7 +374,7 @@ async function setStatusFilter(value) {
 setInterval(async () => {
   if (!state.user || !state.selectedTaskId) return;
   try {
-    await loadTasks();
+    await Promise.all([loadTasks(), loadHealth()]);
     render();
   } catch (_error) {
     // Keep the current screen if a transient refresh fails.

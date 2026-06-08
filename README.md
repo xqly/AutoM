@@ -38,6 +38,7 @@ schema.sql           SQLite 表结构
 frontend/            静态页面、样式和 JS
 scripts/
   setup.py           初始化目录、数据库、默认用户
+  manage_user.py     创建客服账号、改密码、停用账号
   run_server.py      启动网站，可同时启动内置 Worker
   run_worker.py      单独启动 Worker
   smoke_test.py      基础冒烟测试
@@ -70,6 +71,25 @@ support / support123
 ```
 
 生产环境请立刻修改密码。当前 MVP 没有做复杂权限，`role` 主要用于后续扩展。
+
+修改默认密码：
+
+```bash
+python3 scripts/manage_user.py set-password support
+python3 scripts/manage_user.py set-password admin
+```
+
+创建客服账号：
+
+```bash
+python3 scripts/manage_user.py add alice "客服 Alice" --role support
+```
+
+查看账号：
+
+```bash
+python3 scripts/manage_user.py list
+```
 
 2. 本地 dry-run 启动，不调用 Codex：
 
@@ -114,6 +134,7 @@ python3 scripts/run_server.py
 | `AUTOM_CODEX_MODEL` | 空 | 可选，传给 `codex exec -m` |
 | `AUTOM_CODEX_DRY_RUN` | `0` | `1` 时生成示例文件，不调用 Codex |
 | `AUTOM_CODEX_TIMEOUT_SECONDS` | `1800` | 单任务 Codex 超时 |
+| `AUTOM_CODEX_EARLY_ACCEPT_SECONDS` | `20` | 真实模式下产物通过校验并稳定多少秒后提前验收，防止 Codex 过度自检卡住 |
 | `AUTOM_WORKER_POLL_SECONDS` | `3` | Worker 轮询间隔 |
 | `AUTOM_MAX_ATTACHMENT_BYTES` | `10485760` | 单个附件最大字节数 |
 | `AUTOM_SESSION_TTL_HOURS` | `72` | 登录有效期 |
@@ -127,6 +148,7 @@ python3 scripts/setup.py
 python3 scripts/run_server.py
 python3 scripts/run_worker.py
 python3 scripts/smoke_test.py
+python3 scripts/manage_user.py list
 ```
 
 Windows:
@@ -136,6 +158,7 @@ python scripts\setup.py
 python scripts\run_server.py
 python scripts\run_worker.py
 python scripts\smoke_test.py
+python scripts\manage_user.py list
 ```
 
 `run_server.py` 默认会同时启动一个内置 Worker。生产环境也可以拆成两个进程：
@@ -177,6 +200,31 @@ codex exec \
 ```
 
 如有参考图片，会追加 `-i input/attachments/xxx.png`。
+
+Worker 在真实模式下会做基础产物校验：
+
+- `model.py` 必须是非空 PyMADCAD/MadCAD 风格源码。
+- `model.stl` 必须看起来像 STL 数据。
+- `preview.png` 必须有 PNG 文件头。
+- `manifest.json` 必须是 JSON 对象，并包含 `unit` 和 `files`。
+
+如果四个产物通过校验并且文件大小稳定超过 `AUTOM_CODEX_EARLY_ACCEPT_SECONDS`，Worker 会提前验收并终止仍在继续深度自检的 `codex exec` 进程，避免任务长时间停在 `running`。
+
+## 运行状态检查
+
+登录后前端右上角会显示当前运行模式：
+
+- `Dry-run`：不会调用 Codex，只生成示例产物。
+- `Codex`：会调用 `codex exec`。
+- `可用/未找到`：后端是否能找到 `AUTOM_CODEX_COMMAND` 指向的命令。
+
+也可以直接请求：
+
+```text
+GET /api/health
+```
+
+该接口会返回 dry-run 状态、Codex 命令、数据目录、任务状态数量和 Job 状态数量。
 
 ## 数据库
 
@@ -229,7 +277,12 @@ python scripts\run_server.py
 
 ## 下一步建议
 
-- 增加修改密码页面。
-- 增加任务重试时的 prompt 版本记录。
-- 对 `model.py` 执行更严格的 MadCAD 校验。
+当前已经具备：客服登录、任务提交、参考图片上传、`codex exec` Worker、PNG 预览、结果下载、任务重试、账号脚本、健康检查。
+
+建议下一步继续做：
+
+- 对 `model.py` 执行更严格的 MadCAD/PyMADCAD 校验和预览渲染。
+- 增加任务重试时的 prompt 版本记录，便于回溯。
+- 做数据库备份脚本和 `data/` 清理策略。
 - 当每天任务耗时过长时，把 Worker 数量从 1 提升到 2 或更多。
+- 增加 HTTPS/Nginx/systemd 生产部署样例文件。

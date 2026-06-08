@@ -47,6 +47,7 @@ class Settings:
     codex_model: str
     codex_dry_run: bool
     codex_timeout_seconds: int
+    codex_early_accept_seconds: int
     worker_poll_seconds: int
     max_attachment_bytes: int
     session_ttl_hours: int
@@ -67,6 +68,7 @@ def get_settings() -> Settings:
         codex_model=os.environ.get("AUTOM_CODEX_MODEL", ""),
         codex_dry_run=env_bool("AUTOM_CODEX_DRY_RUN", False),
         codex_timeout_seconds=env_int("AUTOM_CODEX_TIMEOUT_SECONDS", 1800),
+        codex_early_accept_seconds=env_int("AUTOM_CODEX_EARLY_ACCEPT_SECONDS", 20),
         worker_poll_seconds=env_int("AUTOM_WORKER_POLL_SECONDS", 3),
         max_attachment_bytes=env_int("AUTOM_MAX_ATTACHMENT_BYTES", 10 * 1024 * 1024),
         session_ttl_hours=env_int("AUTOM_SESSION_TTL_HOURS", 72),

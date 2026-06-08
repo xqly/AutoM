@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import mimetypes
+import shutil
 import threading
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
@@ -36,6 +37,8 @@ class AutomHandler(BaseHTTPRequestHandler):
             return self.serve_file(FRONTEND_DIR / parsed.path.removeprefix("/static/"))
         if parsed.path == "/api/me":
             return self.handle_me()
+        if parsed.path == "/api/health":
+            return self.handle_health()
         if parsed.path == "/api/tasks":
             return self.handle_list_tasks(parsed.query)
         if parsed.path.startswith("/api/tasks/") and parsed.path.endswith("/events"):
@@ -44,6 +47,8 @@ class AutomHandler(BaseHTTPRequestHandler):
             return self.handle_get_task(parsed.path)
         if parsed.path.startswith("/api/artifacts/") and parsed.path.endswith("/download"):
             return self.handle_download_artifact(parsed.path)
+        if parsed.path.startswith("/api/attachments/") and parsed.path.endswith("/download"):
+            return self.handle_download_attachment(parsed.path)
         self.send_error_json(HTTPStatus.NOT_FOUND, "Not found.")
 
     def do_POST(self) -> None:
@@ -173,6 +178,33 @@ class AutomHandler(BaseHTTPRequestHandler):
         if user is None:
             return self.write_json(HTTPStatus.OK, {"user": None})
         self.write_json(HTTPStatus.OK, {"user": user})
+
+    def handle_health(self) -> None:
+        user = self.require_user()
+        if user is None:
+            return
+        with connect(self.settings) as conn:
+            task_rows = conn.execute(
+                "SELECT status, COUNT(*) AS count FROM drawing_requests GROUP BY status"
+            ).fetchall()
+            job_rows = conn.execute("SELECT status, COUNT(*) AS count FROM jobs GROUP BY status").fetchall()
+        codex_path = shutil.which(self.settings.codex_command)
+        payload = {
+            "ok": True,
+            "dry_run": self.settings.codex_dry_run,
+            "worker_enabled": self.settings.worker_enabled,
+            "data_dir": str(self.settings.data_dir),
+            "database_path": str(self.settings.database_path),
+            "codex": {
+                "command": self.settings.codex_command,
+                "found": codex_path is not None or Path(self.settings.codex_command).exists(),
+                "path": codex_path or self.settings.codex_command,
+                "model": self.settings.codex_model or None,
+            },
+            "tasks": {row["status"]: row["count"] for row in task_rows},
+            "jobs": {row["status"]: row["count"] for row in job_rows},
+        }
+        self.write_json(HTTPStatus.OK, payload)
 
     def handle_create_task(self) -> None:
         user = self.require_user()
@@ -395,6 +427,30 @@ class AutomHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", row["mime_type"] or "application/octet-stream")
         self.send_header("Content-Length", str(len(data)))
         disposition = "inline" if row["kind"] == "preview_png" else "attachment"
+        self.send_header("Content-Disposition", f'{disposition}; filename="{row["original_name"]}"')
+        self.end_headers()
+        self.wfile.write(data)
+
+    def handle_download_attachment(self, path: str) -> None:
+        user = self.require_user()
+        if user is None:
+            return
+        attachment_id = parse_id(path.removesuffix("/download"), "/api/attachments/")
+        if attachment_id is None:
+            return self.send_error_json(HTTPStatus.NOT_FOUND, "Not found.")
+        with connect(self.settings) as conn:
+            row = conn.execute("SELECT * FROM attachments WHERE id = ?", (attachment_id,)).fetchone()
+        if row is None:
+            return self.send_error_json(HTTPStatus.NOT_FOUND, "Attachment not found.")
+        file_path = (self.settings.data_dir / row["storage_path"]).resolve()
+        data_root = self.settings.data_dir.resolve()
+        if not file_path.is_file() or not str(file_path).startswith(str(data_root)):
+            return self.send_error_json(HTTPStatus.NOT_FOUND, "Attachment file not found.")
+        data = file_path.read_bytes()
+        self.send_response(HTTPStatus.OK.value)
+        self.send_header("Content-Type", row["mime_type"] or "application/octet-stream")
+        self.send_header("Content-Length", str(len(data)))
+        disposition = "inline" if str(row["mime_type"] or "").startswith("image/") else "attachment"
         self.send_header("Content-Disposition", f'{disposition}; filename="{row["original_name"]}"')
         self.end_headers()
         self.wfile.write(data)
